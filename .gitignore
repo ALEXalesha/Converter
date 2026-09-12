@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.hypothesis/
+build/
+dist/
+*.spec
+.remember/
+.vscode/
+*_печать.pdf
