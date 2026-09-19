@@ -38,6 +38,10 @@ Name: "contextmenu"; Description: "Пункт «Подготовить к печ
 [Files]
 Source: "dist\RaspisaniePrint\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[InstallDelete]
+; 2.0 перешла с tkinter на Qt: старые библиотеки 1.x из _internal убираем, чтобы не копились.
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon

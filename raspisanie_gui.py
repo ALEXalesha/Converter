@@ -1,11 +1,15 @@
-import base64
+"""Окно «Расписание на печать» на Qt (PySide6): предпросмотр, настройки, сохранение."""
 import json
 import os
 import queue
 import sys
 import threading
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+
+from PySide6.QtCore import QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QKeySequence, QPainter, QShortcut
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QFileDialog, QGroupBox, QHBoxLayout,
+                               QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar, QPushButton,
+                               QRadioButton, QSlider, QSpinBox, QStyleFactory, QVBoxLayout, QWidget)
 
 import raspisanie_core as core
 
@@ -13,12 +17,13 @@ APP_NAME = "Расписание на печать"
 SETTINGS_PATH = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "RaspisaniePrint", "settings.json")
 SCALE_MIN = 30
 ROTATE_LABELS = ((270, "По часовой стрелке"), (90, "Против часовой"), (0, "Без поворота"))
-FILE_TYPES = [
-    ("Расписание", " ".join("*" + ext for ext in core.SOURCE_EXTS)),
-    ("PDF", "*.pdf"),
-    ("Word", " ".join("*" + ext for ext in core.WORD_EXTS)),
-    ("Все файлы", "*.*"),
-]
+FILE_FILTER = ("Расписание (" + " ".join("*" + ext for ext in core.SOURCE_EXTS) + ");;"
+               "PDF (*.pdf);;Word (" + " ".join("*" + ext for ext in core.WORD_EXTS) + ");;Все файлы (*.*)")
+PREVIEW_DELAY_MS = 120
+POLL_MS = 100
+UI_FONT_SIZE = 10
+STATUS_READY = "Выберите файл расписания: .docx или .pdf (или перетащите его в окно)"
+_translators = []  # Qt хранит только указатель на переводчик — держим объект живым
 
 
 def resource_path(name):
@@ -61,169 +66,290 @@ def save_settings(cfg):
         pass
 
 
-class App:
-    def __init__(self, root, initial_path=None):
-        self.root = root
+class dialogs:  # noqa: N801 — пространство имён: тесты подменяют эти функции
+    @staticmethod
+    def info(parent, text):
+        QMessageBox.information(parent, APP_NAME, text)
+
+    @staticmethod
+    def warning(parent, text):
+        QMessageBox.warning(parent, APP_NAME, text)
+
+    @staticmethod
+    def error(parent, text):
+        QMessageBox.critical(parent, APP_NAME, text)
+
+    @staticmethod
+    def yes_no(parent, text):
+        return QMessageBox.question(parent, APP_NAME, text) == QMessageBox.Yes
+
+    @staticmethod
+    def open_path(parent, start_dir):
+        return QFileDialog.getOpenFileName(parent, "Файл расписания", start_dir, FILE_FILTER)[0]
+
+    @staticmethod
+    def save_path(parent, suggested):
+        return QFileDialog.getSaveFileName(parent, "Куда сохранить PDF", suggested, "PDF (*.pdf)")[0]
+
+    @staticmethod
+    def open_file(path):
+        os.startfile(path)  # noqa: S606 (только Windows)
+
+
+class Preview(QWidget):
+    """Лист A4 с тенью. Готовая картинка сразу масштабируется под новый размер,
+    а чёткая рендерится заново, когда размер перестал меняться."""
+
+    BG = QColor("#d9dde3")
+    SHADOW = QColor("#a9aeb6")
+    MARGIN = 16
+
+    def __init__(self, on_resized, parent=None):
+        super().__init__(parent)
+        self.image = None  # QImage последнего рендера
+        self.on_resized = on_resized
+        self.setMinimumSize(200, 200)
+
+    def page_height(self):
+        """Высота листа, который помещается в виджет целиком (книжный A4)."""
+        w, h = self.width(), self.height()
+        return min(h - 2 * self.MARGIN, (w - 2 * self.MARGIN) * core.PORTRAIT_H / core.PORTRAIT_W)
+
+    def page_rect(self):
+        ph = self.page_height()
+        pw = ph * core.PORTRAIT_W / core.PORTRAIT_H
+        return QRectF((self.width() - pw) / 2, (self.height() - ph) / 2, pw, ph)
+
+    def set_image(self, image):
+        self.image = image
+        self.update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.on_resized()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.fillRect(self.rect(), self.BG)
+        if self.image is None:
+            p.setPen(QColor("#555b63"))
+            f = QFont(self.font())
+            f.setPointSizeF(f.pointSizeF() + 2)
+            p.setFont(f)
+            p.drawText(self.rect(), Qt.AlignCenter, "Здесь будет предпросмотр листа")
+            p.end()
+            return
+        if self.page_height() < 50:
+            p.end()
+            return
+        r = self.page_rect()
+        p.fillRect(r.translated(4, 4), self.SHADOW)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.drawImage(r, self.image)
+        p.end()
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, initial_path=None):
+        super().__init__()
         self.cfg = load_settings()
         self.src = None
         self.src_path = None
         self.loading = False
-        self.preview_img = None
+        self.error = False
         self.jobs = queue.Queue()
-        self._preview_job = None
+        self.closed = False
 
-        self.path_var = tk.StringVar()
-        self.out_var = tk.StringVar()
-        self.rotate_var = tk.IntVar(value=self.cfg["rotate"])
-        self.scale_var = tk.IntVar(value=round(self.cfg["scale"] * 100))
-        self.open_after_var = tk.BooleanVar(value=self.cfg["open_after"])
-        self.status_var = tk.StringVar(value="Выберите файл расписания: .docx или .pdf")
-
-        root.title(APP_NAME)
-        root.geometry("980x700")
-        root.minsize(820, 600)
-        try:
-            root.iconbitmap(resource_path(os.path.join("assets", "icon.ico")))
-        except tk.TclError:
-            pass
+        self.setWindowTitle(APP_NAME)
+        self.resize(980, 700)
+        self.setMinimumSize(820, 600)
+        self.setAcceptDrops(True)
         self._build_ui()
-        root.protocol("WM_DELETE_WINDOW", self.close)
-        root.bind("<Control-o>", lambda e: self.choose_file())
-        root.bind("<Control-s>", lambda e: self.save())
-        root.after(100, self._poll_jobs)
+
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.setInterval(PREVIEW_DELAY_MS)
+        self.preview_timer.timeout.connect(self.update_preview)
+        self.poll_timer = QTimer(self)
+        self.poll_timer.setInterval(POLL_MS)
+        self.poll_timer.timeout.connect(self._poll_jobs)
+        self.poll_timer.start()
+
+        self.open_shortcut = QShortcut(QKeySequence("Ctrl+O"), self, self.choose_file)
+        self.save_shortcut = QShortcut(QKeySequence("Ctrl+S"), self, self.save)
         if initial_path:
             self.open_path(initial_path)
 
+    # ---- интерфейс -------------------------------------------------------------------
+
     def _build_ui(self):
-        style = ttk.Style(self.root)
-        style.configure("Accent.TButton", font=("Segoe UI", 11, "bold"), padding=(12, 8))
-        style.configure("Hint.TLabel", foreground="#666")
-        style.configure("Error.TLabel", foreground="#b00020")
+        central = QWidget()
+        root = QVBoxLayout(central)
+        root.setContentsMargins(12, 12, 12, 8)
+        body = QHBoxLayout()
+        root.addLayout(body, 1)
+        self.setCentralWidget(central)
 
-        main = ttk.Frame(self.root, padding=12)
-        main.pack(fill="both", expand=True)
-        main.columnconfigure(1, weight=1)
-        main.rowconfigure(0, weight=1)
+        side = QWidget()
+        side.setFixedWidth(330)
+        side_lay = QVBoxLayout(side)
+        side_lay.setContentsMargins(0, 0, 0, 0)
+        body.addWidget(side)
 
-        side = ttk.Frame(main, width=330)
-        side.grid(row=0, column=0, sticky="ns", padx=(0, 12))
+        box = QGroupBox("Исходный файл")
+        lay = QVBoxLayout(box)
+        self.path_edit = QLineEdit()
+        self.path_edit.setReadOnly(True)
+        self.open_btn = QPushButton("Выбрать файл…  (Ctrl+O)")
+        self.open_btn.clicked.connect(self.choose_file)
+        lay.addWidget(self.path_edit)
+        lay.addWidget(self.open_btn)
+        side_lay.addWidget(box)
 
-        box = ttk.LabelFrame(side, text="Исходный файл", padding=8)
-        box.pack(fill="x")
-        self.path_entry = ttk.Entry(box, textvariable=self.path_var, state="readonly", width=40)
-        self.path_entry.pack(fill="x")
-        self.open_btn = ttk.Button(box, text="Выбрать файл...  (Ctrl+O)", command=self.choose_file)
-        self.open_btn.pack(fill="x", pady=(6, 0))
-
-        box = ttk.LabelFrame(side, text="Настройки", padding=8)
-        box.pack(fill="x", pady=(10, 0))
-        row = ttk.Frame(box)
-        row.pack(fill="x")
-        ttk.Label(row, text="Страница:").pack(side="left")
-        self.page_spin = ttk.Spinbox(row, from_=1, to=1, width=5, command=self.schedule_preview)
-        self.page_spin.set("1")
-        self.page_spin.pack(side="left", padx=6)
-        self.page_spin.bind("<KeyRelease>", lambda e: self.schedule_preview())
-        self.pages_label = ttk.Label(row, text="из 1", style="Hint.TLabel")
-        self.pages_label.pack(side="left")
-
-        ttk.Label(box, text="Поворот таблицы:").pack(anchor="w", pady=(10, 2))
+        box = QGroupBox("Настройки")
+        lay = QVBoxLayout(box)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Страница:"))
+        self.page_spin = QSpinBox()
+        self.page_spin.setRange(1, 1)
+        self.page_spin.valueChanged.connect(lambda _v: self.schedule_preview())
+        row.addWidget(self.page_spin)
+        self.pages_label = QLabel("из 1")
+        row.addWidget(self.pages_label)
+        row.addStretch(1)
+        lay.addLayout(row)
+        lay.addSpacing(6)
+        lay.addWidget(QLabel("Поворот таблицы:"))
+        self.rotate_group = QButtonGroup(self)
+        self.rotate_buttons = {}
         for angle, label in ROTATE_LABELS:
-            ttk.Radiobutton(box, text=label, value=angle, variable=self.rotate_var,
-                            command=self.schedule_preview).pack(anchor="w")
-
-        ttk.Label(box, text="Высота таблицы на листе:").pack(anchor="w", pady=(10, 2))
-        row = ttk.Frame(box)
-        row.pack(fill="x")
-        ttk.Scale(row, from_=SCALE_MIN, to=100, variable=self.scale_var,
-                  command=self._on_scale).pack(side="left", fill="x", expand=True)
-        self.scale_label = ttk.Label(row, width=6, anchor="e")
-        self.scale_label.pack(side="left")
+            rb = QRadioButton(label)
+            self.rotate_group.addButton(rb, angle)
+            self.rotate_buttons[angle] = rb
+            lay.addWidget(rb)
+        self.rotate_buttons[self.cfg["rotate"]].setChecked(True)
+        self.rotate_group.idToggled.connect(lambda _id, on: on and self.schedule_preview())
+        lay.addSpacing(6)
+        lay.addWidget(QLabel("Высота таблицы на листе:"))
+        row = QHBoxLayout()
+        self.scale_slider = QSlider(Qt.Horizontal)
+        self.scale_slider.setRange(SCALE_MIN, 100)
+        self.scale_slider.setValue(round(self.cfg["scale"] * 100))
+        self.scale_label = QLabel()
+        self.scale_label.setMinimumWidth(48)
+        self.scale_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.scale_slider.valueChanged.connect(self._on_scale)
+        row.addWidget(self.scale_slider, 1)
+        row.addWidget(self.scale_label)
+        lay.addLayout(row)
         self._show_scale()
-        ttk.Button(box, text="Сбросить настройки", command=self.reset_options).pack(anchor="w", pady=(8, 0))
+        self.reset_btn = QPushButton("Сбросить настройки")
+        self.reset_btn.clicked.connect(self.reset_options)
+        row = QHBoxLayout()
+        row.addWidget(self.reset_btn)
+        row.addStretch(1)
+        lay.addLayout(row)
+        side_lay.addWidget(box)
 
-        box = ttk.LabelFrame(side, text="Сохранить как", padding=8)
-        box.pack(fill="x", pady=(10, 0))
-        self.out_entry = ttk.Entry(box, textvariable=self.out_var, width=40)
-        self.out_entry.pack(fill="x")
-        ttk.Button(box, text="Изменить...", command=self.choose_output).pack(anchor="w", pady=(6, 0))
-        ttk.Checkbutton(box, text="Открыть PDF после сохранения", variable=self.open_after_var).pack(anchor="w", pady=(6, 0))
+        box = QGroupBox("Сохранить как")
+        lay = QVBoxLayout(box)
+        self.out_edit = QLineEdit()
+        self.change_btn = QPushButton("Изменить…")
+        self.change_btn.clicked.connect(self.choose_output)
+        self.open_after = QCheckBox("Открыть PDF после сохранения")
+        self.open_after.setChecked(self.cfg["open_after"])
+        row = QHBoxLayout()
+        row.addWidget(self.change_btn)
+        row.addStretch(1)
+        lay.addWidget(self.out_edit)
+        lay.addLayout(row)
+        lay.addWidget(self.open_after)
+        side_lay.addWidget(box)
 
-        self.save_btn = ttk.Button(side, text="Сохранить PDF  (Ctrl+S)", style="Accent.TButton", command=self.save)
-        self.save_btn.pack(fill="x", pady=(14, 0))
-        ttk.Label(side, text="При печати выберите «Реальный размер»\nили «Без масштабирования».",
-                  style="Hint.TLabel", justify="left").pack(anchor="w", pady=(8, 0))
+        self.save_btn = QPushButton("Сохранить PDF  (Ctrl+S)")
+        f = QFont(self.save_btn.font())
+        f.setBold(True)
+        f.setPointSizeF(f.pointSizeF() + 1)
+        self.save_btn.setFont(f)
+        self.save_btn.setMinimumHeight(40)
+        self.save_btn.clicked.connect(self.save)
+        side_lay.addSpacing(8)
+        side_lay.addWidget(self.save_btn)
+        hint = QLabel("При печати выберите «Реальный размер»\nили «Без масштабирования».")
+        hint.setEnabled(False)  # серый текст в любой теме
+        side_lay.addWidget(hint)
+        side_lay.addStretch(1)
 
-        self.canvas = tk.Canvas(main, background="#d9dde3", highlightthickness=0)
-        self.canvas.grid(row=0, column=1, sticky="nsew")
-        self.canvas.bind("<Configure>", lambda e: self.schedule_preview())
+        self.preview = Preview(self.schedule_preview)
+        body.addWidget(self.preview, 1)
 
-        bar = ttk.Frame(main)
-        bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        self.status_label = ttk.Label(bar, textvariable=self.status_var)
-        self.status_label.pack(side="left")
-        self.progress = ttk.Progressbar(bar, mode="indeterminate", length=160)
+        bar = QHBoxLayout()
+        self.status_label = QLabel(STATUS_READY)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)  # бегущая полоска
+        self.progress.setFixedWidth(160)
+        self.progress.hide()
+        bar.addWidget(self.status_label, 1)
+        bar.addWidget(self.progress)
+        root.addLayout(bar)
 
     def set_status(self, msg, error=False):
-        self.status_var.set(msg)
-        self.status_label.configure(style="Error.TLabel" if error else "TLabel")
+        self.error = error
+        self.status_label.setText(msg)
+        self.status_label.setStyleSheet("color: #d0342c;" if error else "")
 
     def set_busy(self, busy, msg=""):
         self.loading = busy
-        state = "disabled" if busy else "normal"
-        self.open_btn.configure(state=state)
-        self.save_btn.configure(state=state)
+        self.open_btn.setEnabled(not busy)
+        self.save_btn.setEnabled(not busy)
+        self.progress.setVisible(busy)
         if busy:
-            self.progress.pack(side="right")
-            self.progress.start(12)
             self.set_status(msg)
-        else:
-            self.progress.stop()
-            self.progress.pack_forget()
 
-    def _on_scale(self, raw):
-        self.scale_var.set(round(float(raw)))
+    def _on_scale(self, _value):
         self._show_scale()
         self.schedule_preview()
 
     def _show_scale(self):
-        self.scale_label.configure(text=f"{self.scale_var.get()} %")
+        self.scale_label.setText(f"{self.scale_slider.value()} %")
+
+    @property
+    def rotate(self):
+        return self.rotate_group.checkedId()
+
+    def set_rotate(self, angle):
+        self.rotate_buttons[angle].setChecked(True)
 
     def reset_options(self):
-        self.scale_var.set(round(core.DEFAULT_SCALE * 100))
-        self.rotate_var.set(core.DEFAULT_ROTATE)
+        self.scale_slider.setValue(round(core.DEFAULT_SCALE * 100))
+        self.set_rotate(core.DEFAULT_ROTATE)
         self._show_scale()
         self.schedule_preview()
 
     def read_options(self):
-        try:
-            page = int(self.page_spin.get())
-        except ValueError:
-            raise core.PrintPrepError("Номер страницы должен быть целым числом") from None
-        return self.scale_var.get() / 100, self.rotate_var.get(), page - 1
+        return self.scale_slider.value() / 100, self.rotate, self.page_spin.value() - 1
+
+    # ---- файлы ---------------------------------------------------------------------
 
     def choose_file(self):
         if self.loading:
             return
-        path = filedialog.askopenfilename(parent=self.root, title="Файл расписания",
-                                          initialdir=self.cfg["last_dir"] or None, filetypes=FILE_TYPES)
+        path = dialogs.open_path(self, self.cfg["last_dir"] or "")
         if path:
             self.open_path(path)
 
     def choose_output(self):
-        current = self.out_var.get() or (self.src_path and core.default_output_path(self.src_path)) or ""
-        path = filedialog.asksaveasfilename(
-            parent=self.root, title="Куда сохранить PDF", defaultextension=".pdf",
-            initialdir=os.path.dirname(current) or None, initialfile=os.path.basename(current),
-            filetypes=[("PDF", "*.pdf")],
-        )
+        current = self.out_edit.text() or (self.src_path and core.default_output_path(self.src_path)) or ""
+        path = dialogs.save_path(self, current)
         if path:
-            self.out_var.set(os.path.normpath(path))
+            if not path.lower().endswith(".pdf"):
+                path += ".pdf"
+            self.out_edit.setText(os.path.normpath(path))
             self._show_path_ends()
 
     def _show_path_ends(self):
-        for entry in (self.path_entry, self.out_entry):
-            entry.xview_moveto(1)
+        for edit in (self.path_edit, self.out_edit):
+            edit.setCursorPosition(len(edit.text()))
 
     def open_path(self, path):
         if self.loading:
@@ -236,7 +362,7 @@ class App:
     def _load_worker(self, path):
         try:
             self.jobs.put(("loaded", path, core.load_source(path)))
-        except Exception as e:  # the UI waits for a reply, so every failure has to reach it
+        except Exception as e:  # окно ждёт ответа, поэтому до него должна дойти любая ошибка
             self.jobs.put(("failed", path, e))
 
     def _poll_jobs(self):
@@ -244,43 +370,65 @@ class App:
             while True:
                 kind, path, payload = self.jobs.get_nowait()
                 self.set_busy(False)
+                if self.closed:
+                    if kind == "loaded":
+                        payload.close()
+                    continue
                 if kind == "loaded":
                     self._on_loaded(path, payload)
                 else:
                     self.set_status(f"Не удалось открыть файл: {payload}", error=True)
-                    messagebox.showerror(APP_NAME, str(payload), parent=self.root)
+                    dialogs.error(self, str(payload))
         except queue.Empty:
             pass
-        self.root.after(100, self._poll_jobs)
 
     def _on_loaded(self, path, src):
         if self.src is not None:
             self.src.close()
         self.src, self.src_path = src, path
-        self.path_var.set(path)
-        self.out_var.set(core.default_output_path(path))
+        self.path_edit.setText(path)
+        self.out_edit.setText(core.default_output_path(path))
         self._show_path_ends()
-        self.page_spin.configure(to=src.page_count)
-        self.page_spin.set("1")
-        self.pages_label.configure(text=f"из {src.page_count}")
+        self.page_spin.blockSignals(True)
+        self.page_spin.setRange(1, src.page_count)
+        self.page_spin.setValue(1)
+        self.page_spin.blockSignals(False)
+        self.pages_label.setText(f"из {src.page_count}")
         self.cfg["last_dir"] = os.path.dirname(path)
         self.set_status(f"Открыт: {os.path.basename(path)}, страниц: {src.page_count}")
         self.update_preview()
 
+    # ---- перетаскивание --------------------------------------------------------------
+
+    @staticmethod
+    def _dropped_path(mime):
+        urls = [u for u in mime.urls() if u.isLocalFile()] if mime.hasUrls() else []
+        if len(urls) != 1:
+            return None
+        path = urls[0].toLocalFile()
+        return path if os.path.splitext(path)[1].lower() in core.SOURCE_EXTS else None
+
+    def dragEnterEvent(self, event):
+        if not self.loading and self._dropped_path(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        path = self._dropped_path(event.mimeData())
+        if path and not self.loading:
+            event.acceptProposedAction()
+            self.open_path(path)
+
+    # ---- предпросмотр ----------------------------------------------------------------
+
     def schedule_preview(self):
-        if self._preview_job:
-            self.root.after_cancel(self._preview_job)
-        self._preview_job = self.root.after(120, self.update_preview)
+        self.preview_timer.start()  # перезапуск: рендер после последнего изменения
 
     def update_preview(self):
-        self._preview_job = None
-        c = self.canvas
-        c.delete("all")
-        w, h = c.winfo_width(), c.winfo_height()
+        self.preview_timer.stop()
         if self.src is None:
-            c.create_text(w // 2, h // 2, text="Здесь будет предпросмотр листа", fill="#666", font=("Segoe UI", 12))
+            self.preview.set_image(None)
             return
-        page_h = min(h - 32, (w - 32) * core.PORTRAIT_H / core.PORTRAIT_W)
+        page_h = self.preview.page_height() * self.preview.devicePixelRatioF()
         if page_h < 50:
             return
         try:
@@ -292,63 +440,82 @@ class App:
             png = core.render_png(doc, page_h)
         finally:
             doc.close()
-        self.preview_img = tk.PhotoImage(data=base64.b64encode(png))
-        iw, ih = self.preview_img.width(), self.preview_img.height()
-        x0, y0 = (w - iw) // 2, (h - ih) // 2
-        c.create_rectangle(x0 + 4, y0 + 4, x0 + iw + 4, y0 + ih + 4, fill="#a9aeb6", outline="")
-        c.create_image(x0, y0, image=self.preview_img, anchor="nw")
-        if self.status_label.cget("style") == "Error.TLabel":
+        image = QImage.fromData(png, "PNG")
+        self.preview.set_image(image)
+        if self.error:
             self.set_status(f"Открыт: {os.path.basename(self.src_path)}, страниц: {self.src.page_count}")
+
+    # ---- сохранение ------------------------------------------------------------------
 
     def save(self):
         if self.loading:
             return
         if self.src is None:
-            messagebox.showinfo(APP_NAME, "Сначала выберите файл расписания.", parent=self.root)
+            dialogs.info(self, "Сначала выберите файл расписания.")
             return
-        out_path = self.out_var.get().strip()
+        out_path = self.out_edit.text().strip()
         if not out_path:
-            messagebox.showerror(APP_NAME, "Укажите, куда сохранить PDF.", parent=self.root)
+            dialogs.error(self, "Укажите, куда сохранить PDF.")
             return
         try:
             scale, rotate, page_index = self.read_options()
             core.export(self.src, self.src_path, out_path, scale, rotate, page_index)
         except core.PrintPrepError as e:
             self.set_status(str(e), error=True)
-            messagebox.showerror(APP_NAME, str(e), parent=self.root)
+            dialogs.error(self, str(e))
             return
 
         out_path = os.path.abspath(out_path)
-        self.cfg.update(scale=scale, rotate=rotate, open_after=self.open_after_var.get())
-        save_settings(self.cfg)
+        self.cfg.update(scale=scale, rotate=rotate, open_after=self.open_after.isChecked())
+        save_settings(clean_settings(self.cfg))
         self.set_status(f"Сохранено: {out_path}")
-        if self.open_after_var.get():
+        if self.open_after.isChecked():
             try:
-                os.startfile(out_path)
+                dialogs.open_file(out_path)
             except OSError as e:
-                messagebox.showwarning(APP_NAME, f"PDF сохранён, но открыть его не получилось: {e}", parent=self.root)
+                dialogs.warning(self, f"PDF сохранён, но открыть его не получилось: {e}")
 
-    def close(self):
-        if self.loading and not messagebox.askyesno(
-                APP_NAME, "Файл ещё конвертируется. Закрыть программу всё равно?", parent=self.root):
+    def closeEvent(self, event):
+        if self.loading and not dialogs.yes_no(self, "Файл ещё конвертируется. Закрыть программу всё равно?"):
+            event.ignore()
             return
-        self.cfg.update(scale=self.scale_var.get() / 100, rotate=self.rotate_var.get(),
-                        open_after=self.open_after_var.get())
+        self.closed = True
+        self.preview_timer.stop()
+        self.cfg.update(scale=self.scale_slider.value() / 100, rotate=self.rotate,
+                        open_after=self.open_after.isChecked())
         save_settings(clean_settings(self.cfg))
         if self.src is not None:
             self.src.close()
-        self.root.destroy()
+            self.src = None
+        event.accept()
+
+
+def create_app():
+    from PySide6.QtCore import QLibraryInfo, QLocale, QTranslator
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+    app.setApplicationName(APP_NAME)
+    if "windows11" in [k.lower() for k in QStyleFactory.keys()]:
+        app.setStyle("windows11")  # на Windows 10 Qt сам возьмёт windowsvista
+    font = QFont(app.font())
+    font.setPointSize(UI_FONT_SIZE)
+    app.setFont(font)
+    icon = resource_path(os.path.join("assets", "icon.ico"))
+    if os.path.isfile(icon):
+        app.setWindowIcon(QIcon(icon))
+    if not _translators:
+        tr = QTranslator(app)
+        # стандартные кнопки («Да», «Отмена») и окна выбора файла — из каталога самого Qt
+        if tr.load(QLocale(QLocale.Russian), "qtbase", "_", QLibraryInfo.path(QLibraryInfo.TranslationsPath)):
+            app.installTranslator(tr)
+            _translators.append(tr)
+    return app
 
 
 def main():
-    try:
-        import ctypes
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except (AttributeError, OSError):
-        pass
-    root = tk.Tk()
-    App(root, sys.argv[1] if len(sys.argv) > 1 else None)
-    root.mainloop()
+    app = create_app()
+    win = MainWindow(sys.argv[1] if len(sys.argv) > 1 else None)
+    win.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

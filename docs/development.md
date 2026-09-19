@@ -5,11 +5,11 @@
 | Файл | Что внутри |
 | --- | --- |
 | `raspisanie_core.py` | Вся логика: загрузка файла, конвертация Word в PDF, сборка листа, сохранение, проверка параметров. Не зависит от интерфейса. |
-| `raspisanie_gui.py` | Окно на tkinter: предпросмотр, настройки, сохранение. Вызывает только функции из `raspisanie_core`. |
+| `raspisanie_gui.py` | Окно на Qt (PySide6, стиль windows11): предпросмотр, настройки, сохранение, перетаскивание файла. Вызывает только функции из `raspisanie_core`. Все сообщения и диалоги идут через класс `dialogs`, который тесты подменяют. |
 | `raspisanie_print.py` | Командная строка. Старое имя скрипта оставлено, чтобы не ломать привычный запуск. |
-| `tests/` | Тесты pytest и hypothesis. |
+| `tests/` | Тесты pytest, hypothesis и pytest-qt. |
 | `assets/icon.ico`, `assets/make_icon.py` | Иконка и скрипт, который её рисует (Pillow). |
-| `build.ps1` | Сборка: тесты, PyInstaller (папка и portable), Inno Setup. |
+| `build.ps1` | Сборка в `.venv` проекта: тесты, PyInstaller (папка), portable-архив, Inno Setup. |
 | `installer.iss` | Скрипт установщика Inno Setup 6. Сохранён в UTF-8 с BOM, иначе русский текст сломается. |
 
 ## Как работает
@@ -23,35 +23,40 @@
 
 Направление поворота проверено опытом: в `show_pdf_page` угол 270 даёт поворот по часовой стрелке (текст идёт сверху вниз), 90 - против часовой.
 
-Окно грузит файл в отдельном потоке, потому что Word может конвертировать до минуты. Поток кладёт результат в очередь, окно забирает его таймером `after`. Сам tkinter трогается только из главного потока.
+Окно грузит файл в отдельном потоке, потому что Word может конвертировать до минуты. Поток кладёт результат в очередь, окно забирает его таймером Qt (`poll_timer`, 100 мс). Виджеты трогаются только из главного потока. Если окно закрыли, пока файл грузился, догрузившийся документ сразу закрывается.
+
+Предпросмотр: при изменении размера уже готовая картинка листа сразу масштабируется, а чёткая перерисовывается через 120 мс после последнего изменения (`preview_timer`).
 
 ## Окружение
 
-```bash
-python -m pip install -r requirements-dev.txt
+Все зависимости ставятся в `.venv` внутри проекта, не в общий Python:
+
+```powershell
+py -3 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 ```
 
-Python 3.13, Windows. Для тестов с Word нужен Microsoft Word.
+`build.ps1` делает это сам, если `.venv` ещё нет. Python 3.13, Windows. Для тестов с Word нужен Microsoft Word.
 
 ## Тесты
 
-```bash
-python -m pytest
+```powershell
+.venv\Scripts\python.exe -m pytest
 ```
 
-Быстрый прогон без Word (около 15 секунд):
+Быстрый прогон без Word:
 
-```bash
-python -m pytest -m "not word"
+```powershell
+.venv\Scripts\python.exe -m pytest -m "not word"
 ```
 
 Долгий прогон hypothesis: переменная `HYPOTHESIS_FACTOR` умножает число примеров во всех property-тестах.
 
 ```powershell
-$env:HYPOTHESIS_FACTOR = "15"; python -m pytest tests/test_properties.py
+$env:HYPOTHESIS_FACTOR = "15"; .venv\Scripts\python.exe -m pytest tests/test_properties.py
 ```
 
-Тесты окна открывают настоящие окна tkinter на пару секунд. Все окна живут под одним общим корнем `Tk`: если создавать много `Tk()` в одном процессе, Tcl иногда падает при старте с ошибкой `init.tcl`.
+Тесты окна (pytest-qt) создают настоящие окна Qt с флагом `WA_DontShowOnScreen`: на экране они не появляются, но тема и отрисовка работают как в жизни. Платформа `offscreen` не подходит, она игнорирует тему Windows. Сочетания клавиш Qt срабатывают только в активном окне, поэтому тесты вызывают `shortcut.activated` напрямую.
 
 ## Сборка
 
@@ -59,7 +64,9 @@ $env:HYPOTHESIS_FACTOR = "15"; python -m pytest tests/test_properties.py
 .\build.ps1
 ```
 
-Скрипт прогоняет тесты, собирает `dist\RaspisaniePrint\` (папка для установщика), `dist\RaspisaniePrint-portable-<версия>.exe` и `dist\RaspisaniePrint-Setup-<версия>.exe`. Ключ `-SkipTests` пропускает тесты.
+Скрипт прогоняет тесты, собирает `dist\RaspisaniePrint\` (PyInstaller `--onedir`), упаковывает эту папку в `dist\RaspisaniePrint-portable-<версия>.zip` и собирает `dist\RaspisaniePrint-Setup-<версия>.exe`. Ключ `-SkipTests` пропускает тесты.
+
+Чтобы сборка была меньше, в неё не попадают tkinter, Pillow, numpy, pythonwin и лишние модули Qt, а после PyInstaller удаляются `opengl32sw.dll` и все переводы Qt, кроме русского. Установщик при обновлении удаляет старую папку `_internal`, чтобы библиотеки версии 1.x не копились.
 
 Версия берётся из `__version__` в `raspisanie_core.py` и передаётся в Inno Setup через `/DAppVersion`.
 
@@ -77,6 +84,5 @@ $env:HYPOTHESIS_FACTOR = "15"; python -m pytest tests/test_properties.py
 ## Известные ограничения
 
 - За один раз печатается одна страница.
-- Перетаскивать файл прямо в окно нельзя (в tkinter нет встроенного drag-and-drop). Можно бросить файл на значок программы.
 - Если закрыть окно во время конвертации Word, скрытый процесс Word может остаться.
 - Portable-версия хранит настройки в `%APPDATA%`, как и обычная.

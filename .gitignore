@@ -8,3 +8,4 @@ dist/
 .remember/
 .vscode/
 *_печать.pdf
+.venv/

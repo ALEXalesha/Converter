@@ -5,7 +5,7 @@ import tempfile
 
 import pymupdf as fitz
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 PORTRAIT_W = 595.28
 PORTRAIT_H = 841.89
