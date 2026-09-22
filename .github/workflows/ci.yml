@@ -1,0 +1,37 @@
+# Проверки на каждый пуш.
+#
+# Раннер windows: программа открывает Word через COM и живёт только под Windows.
+# Самого Word на раннере нет, и тесты с ним пропускаются сами - они помечены маркером
+# word и проверяют наличие Word в реестре. Остальные 115 проверок от этого не зависят.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: Проверки
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    # Окно на Qt поднимается и в тестах: без экрана оно должно рисоваться в память.
+    env:
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Зависимости
+        run: pip install -r requirements-dev.txt
+
+      - name: Проверки
+        run: python -m pytest -q
