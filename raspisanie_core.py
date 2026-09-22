@@ -64,7 +64,7 @@ def word_to_pdf_bytes(path):
     tmp_dir = tempfile.mkdtemp(prefix="raspisanie_")
     pdf_path = os.path.join(tmp_dir, "source.pdf")
     pythoncom.CoInitialize()
-    word = None
+    word = doc = None
     try:
         # DispatchEx starts a separate Word process, so Quit() never closes the user's open documents
         word = win32com.client.DispatchEx("Word.Application")
@@ -90,6 +90,11 @@ def word_to_pdf_bytes(path):
                 word.Quit(SaveChanges=0)
             except pythoncom.com_error:
                 pass
+        # Ссылки на Word отпускаем ДО CoUninitialize - такой порядок требует сам COM.
+        # Печать «Windows fatal exception: 0x800706BA/0x800706BE» в логе тестов этим не
+        # убирается и ошибкой не является: прокси освобождаются уже после Quit(), когда
+        # процесса Word нет, RPC гасит это сам, а faulthandler всё равно о них сообщает.
+        doc = word = None
         pythoncom.CoUninitialize()
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
