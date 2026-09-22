@@ -1,8 +1,18 @@
+<div align="center">
+
 # Расписание на печать
 
-Программа берёт расписание на альбомном листе A4 (`.docx` или `.pdf`), поворачивает его на 90° и ставит в верхнюю часть книжного листа A4. Внизу остаётся свободное место, граница отмечена пунктиром для отреза.
+**Берёт расписание на альбомном листе A4 (`.docx` или `.pdf`), поворачивает его на 90° и ставит в верхнюю часть книжного листа A4. Внизу остаётся место, граница отмечена пунктиром для отреза.**
 
-![Иконка](assets/icon.ico)
+[Скачать для Windows](https://github.com/ALEXalesha/Converter/releases/latest) &nbsp;·&nbsp; [English](README.md)
+
+[![CI](https://github.com/ALEXalesha/Converter/actions/workflows/ci.yml/badge.svg)](https://github.com/ALEXalesha/Converter/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/ALEXalesha/Converter?color=4c9aff)](https://github.com/ALEXalesha/Converter/releases/latest)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+<img src="docs/screenshots/window.png" width="900" alt="Окно программы">
+
+</div>
 
 ## Версии для Windows
 
@@ -51,3 +61,9 @@ python raspisanie_print.py "Расписание.pdf" -o "печать.pdf" --sc
 - [docs/development.md](docs/development.md): устройство кода, запуск тестов, сборка.
 - [docs/testing.md](docs/testing.md): какие гипотезы и инварианты проверены, какие баги нашлись.
 - [docs/qt-port.md](docs/qt-port.md): переход окна с tkinter на Qt в версии 2.0.
+
+Скриншот в этом файле рисует `tools/make_screenshots.py`: он делает образец расписания, открывает его в настоящем окне и снимает виджет через `grab()`. Снимок экрана по прямоугольнику окна не годится - окно может оказаться позади других, и в кадр попадёт чужое.
+
+## Лицензия
+
+MIT, файл [LICENSE](LICENSE).
