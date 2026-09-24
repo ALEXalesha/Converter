@@ -38,7 +38,7 @@ Windows 10 or 11, x64. PDF input works on its own; Word formats (`.docx`, `.doc`
 3. `Ctrl+S` saves the PDF next to the original with a `_печать` suffix.
 4. In the print dialog choose "actual size" or "no scaling", otherwise the printer will shrink it again.
 
-Settings are remembered between runs. Details: [docs/user-guide.md](docs/user-guide.md) (in Russian).
+Settings are remembered between runs, and since 2.1.0 so are the window's size and place. Details: [docs/user-guide.md](docs/user-guide.md) (in Russian).
 
 ## Command line
 
@@ -67,7 +67,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-120 tests, about 40 seconds. Five of them need Microsoft Word and skip themselves when it is not installed, which is what happens on CI.
+123 tests, about 40 seconds. Five of them need Microsoft Word and skip themselves when it is not installed, which is what happens on CI.
 
 The interesting part is not the count. The bugs were found by feeding the old code bad input on purpose and then turning every hit into a test - scale above 1 or `nan` accepted silently, page `-1` quietly taken as the last page, output path equal to the input path crashing mupdf with "permission denied", the finished PDF left half-written when it was open in a viewer. After that, property tests with hypothesis checked the invariants over thousands of random inputs: page sizes, a page with its own `/Rotate`, scale, rotation, page number, file names, corrupted settings. The whole list with what each hypothesis found is in [docs/testing.md](docs/testing.md).
 

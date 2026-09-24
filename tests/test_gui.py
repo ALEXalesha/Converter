@@ -439,3 +439,37 @@ def test_random_sequences(app, src_pdf, dialogs, tmp_path):
             open_file(app, src_pdf)
         assert_consistent(app)
         assert not app.error, (step, op, app.status_label.text())
+
+
+# ───────── размер и место окна (2.1.0) ─────────
+
+def test_the_window_comes_back_where_and_how_large_it_was(make_app, tmp_path):
+    from PySide6.QtCore import QRect
+
+    first = make_app()
+    # Экран самого окна: скрытое окно (WA_DontShowOnScreen) не узнаёт о переезде на
+    # другой монитор, и Qt вернул бы его на «свой».
+    area = first.screen().availableGeometry()
+    want = QRect(area.x() + 30, area.y() + 40, 900, 650)
+    first.setGeometry(want)
+    first.close()
+    again = make_app()
+    assert (again.x(), again.y(), again.width(), again.height()) == (want.x(), want.y(), 900, 650)
+
+
+def test_a_broken_window_line_gives_the_default_size(make_app, tmp_path):
+    import json
+
+    path = tmp_path / "cfg" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for bad in ["@@@", "AAAA", "aGVsbG8=", 42, None]:
+        path.write_text(json.dumps({"window": bad}), encoding="utf-8")
+        w = make_app()
+        assert (w.width(), w.height()) == (980, 700), bad
+
+
+def test_settings_keep_the_window_line_and_drop_junk():
+    assert gui.clean_settings({"window": "abc="})["window"] == "abc="
+    for bad in [42, "", None, ["x"]]:
+        assert "window" not in gui.clean_settings({"window": bad})
+

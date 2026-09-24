@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QFileDialo
                                QRadioButton, QSlider, QSpinBox, QStyleFactory, QVBoxLayout, QWidget)
 
 import raspisanie_core as core
+import window_geometry
 
 APP_NAME = "Расписание на печать"
 SETTINGS_PATH = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "RaspisaniePrint", "settings.json")
@@ -46,6 +47,10 @@ def clean_settings(raw):
     last_dir = raw.get("last_dir")
     if isinstance(last_dir, str) and last_dir and os.path.isdir(last_dir):
         cfg["last_dir"] = last_dir
+    # Место и размер окна (2.1.0): строка window_geometry, проверяется при восстановлении.
+    window = raw.get("window")
+    if isinstance(window, str) and window:
+        cfg["window"] = window
     return cfg
 
 
@@ -60,8 +65,11 @@ def load_settings():
 def save_settings(cfg):
     try:
         os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
-        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+        # Через временный файл: убитый посреди записи процесс оставит прежний файл.
+        tmp = SETTINGS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, SETTINGS_PATH)
     except OSError:
         pass
 
@@ -163,6 +171,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.resize(980, 700)
         self.setMinimumSize(820, 600)
+        # Окно открывается там и такого размера, где его закрыли (2.1.0).
+        window_geometry.restore(self, self.cfg.get("window"))
         self.setAcceptDrops(True)
         self._build_ui()
 
@@ -482,7 +492,7 @@ class MainWindow(QMainWindow):
         self.closed = True
         self.preview_timer.stop()
         self.cfg.update(scale=self.scale_slider.value() / 100, rotate=self.rotate,
-                        open_after=self.open_after.isChecked())
+                        open_after=self.open_after.isChecked(), window=window_geometry.encode(self))
         save_settings(clean_settings(self.cfg))
         if self.src is not None:
             self.src.close()
