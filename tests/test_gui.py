@@ -449,14 +449,19 @@ def test_the_window_comes_back_where_and_how_large_it_was(make_app, tmp_path):
     first = make_app()
     # Экран самого окна: скрытое окно (WA_DontShowOnScreen) не узнаёт о переезде на
     # другой монитор, и Qt вернул бы его на «свой».
-    # 840x620 влезает и в экран раннера GitHub 1024x768; 900 не влезало, и Qt честно
-    # придвигал окно к краю - тест падал только в CI.
+    # Размер - от настоящего экрана: на раннере GitHub экран меньше, чем кажется, и окно
+    # 900, а потом 840 в ширину Qt честно придвигал к краю и ужимал до минимума 820.
     area = first.screen().availableGeometry()
-    want = QRect(area.x() + 30, area.y() + 40, 840, 620)
+    w = max(820, min(900, area.width() - 60))
+    h = max(600, min(650, area.height() - 80))
+    if w + 60 > area.width() or h + 80 > area.height():
+        first.close()
+        pytest.skip(f"экран {area.width()}x{area.height()} меньше окна с минимумом 820x600")
+    want = QRect(area.x() + 30, area.y() + 40, w, h)
     first.setGeometry(want)
     first.close()
     again = make_app()
-    assert (again.x(), again.y(), again.width(), again.height()) == (want.x(), want.y(), 840, 620)
+    assert (again.x(), again.y(), again.width(), again.height()) == (want.x(), want.y(), w, h)
 
 
 def test_a_broken_window_line_gives_the_default_size(make_app, tmp_path):
